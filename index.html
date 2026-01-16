@@ -1,0 +1,906 @@
+import { useEffect, useMemo, useState, useRef } from "react";
+
+// Tipos principais
+type Produto =
+  | "Camisa"
+  | "Bermuda"
+  | "Moda Íntima"
+  | "Short"
+  | "Blusa"
+  | "Calça"
+  | "Vestido"
+  | "Atacado";
+
+interface Venda {
+  id: string;
+  vendedor: string;
+  produto: Produto;
+  valor: number; // valor inteiro em reais (ex.: 20, 25, 10)
+  data: string; // ISO
+}
+
+interface Vale {
+  id: string;
+  vendedor: string;
+  valor: number; // em reais (pode ter centavos)
+  data: string; // ISO
+}
+
+interface StatsVendedor {
+  hoje: number;
+  semana: number;
+  mes: number;
+  ano: number;
+  valesTotal: number;
+}
+
+interface Stats {
+  hoje: number;
+  semana: number;
+  mes: number;
+  ano: number;
+  vendedores: Record<string, StatsVendedor>;
+}
+
+type View = "login" | "vendedor" | "admin" | "admin-login";
+type AdminSubView = "extrato" | "comissoes";
+
+const STORAGE_KEYS = {
+  vendasAtivas: "h7_vendas_ativas",
+  historicoArquivado: "h7_historico_arquivado",
+  vales: "h7_vales",
+  vendedorNome: "h7_vendedor_nome",
+} as const;
+
+// Maior valor inteiro permitido (segurança)
+const MAX_VALOR = 999_999;
+
+function formatarMoeda(valor: number): string {
+  return (valor || 0).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+}
+
+function criarStatsVazio(): StatsVendedor {
+  return { hoje: 0, semana: 0, mes: 0, ano: 0, valesTotal: 0 };
+}
+
+export function App() {
+  // Referência para o contexto de áudio (reusado entre vendas)
+  const audioContextRef = useRef<AudioContext | null>(null);
+
+  const tocarSomDinheiro = () => {
+    try {
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return;
+
+      if (!audioContextRef.current) {
+        audioContextRef.current = new Ctx();
+      }
+      const ctx = audioContextRef.current;
+
+      const duration = 0.25; // segundos
+      const oscillator = ctx.createOscillator();
+      const gainNode = ctx.createGain();
+
+      oscillator.type = "square";
+      oscillator.frequency.setValueAtTime(880, ctx.currentTime); // tom inicial
+      oscillator.frequency.exponentialRampToValueAtTime(
+        440,
+        ctx.currentTime + duration,
+      );
+
+      gainNode.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 0.02);
+      gainNode.gain.exponentialRampToValueAtTime(
+        0.0001,
+        ctx.currentTime + duration,
+      );
+
+      oscillator.connect(gainNode);
+      gainNode.connect(ctx.destination);
+
+      oscillator.start();
+      oscillator.stop(ctx.currentTime + duration + 0.02);
+    } catch {
+      // se não conseguir tocar o áudio, só ignora
+    }
+  };
+
+  const [view, setView] = useState<View>("login");
+  const [adminSubView, setAdminSubView] = useState<AdminSubView>("extrato");
+  const [user, setUser] = useState("");
+
+  const [vendas, setVendas] = useState<Venda[]>([]);
+  const [historico, setHistorico] = useState<Venda[]>([]);
+  const [vales, setVales] = useState<Vale[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [adminPass, setAdminPass] = useState("");
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+
+  const [selectedProduct, setSelectedProduct] = useState<Produto | null>(null);
+
+  // Input da calculadora: apenas dígitos, valor inteiro em reais (ex.: 20, 25, 10)
+  const [inputValor, setInputValor] = useState(0);
+
+  const [vendaSucesso, setVendaSucesso] = useState<Venda | null>(null);
+  const [showValeModal, setShowValeModal] = useState<string | null>(null);
+  const [valeInputValue, setValeInputValue] = useState("");
+  const [selectedVendedorDetail, setSelectedVendedorDetail] = useState<
+    string | null
+  >(null);
+
+  const productColors: Record<Produto, string> = {
+    Camisa: "btn-camisa",
+    Bermuda: "btn-bermuda",
+    "Moda Íntima": "btn-moda",
+    Short: "btn-short",
+    Blusa: "btn-blusa",
+    "Calça": "btn-calça",
+    Vestido: "btn-vestido",
+    Atacado: "btn-atacado",
+  };
+
+  // Carregar dados do localStorage
+  useEffect(() => {
+    try {
+      const localVendas = JSON.parse(
+        localStorage.getItem(STORAGE_KEYS.vendasAtivas) ?? "[]",
+      ) as Venda[];
+      const localHistorico = JSON.parse(
+        localStorage.getItem(STORAGE_KEYS.historicoArquivado) ?? "[]",
+      ) as Venda[];
+      const localVales = JSON.parse(
+        localStorage.getItem(STORAGE_KEYS.vales) ?? "[]",
+      ) as Vale[];
+      const savedUser = localStorage.getItem(STORAGE_KEYS.vendedorNome) ?? "";
+
+      setVendas(Array.isArray(localVendas) ? localVendas : []);
+      setHistorico(Array.isArray(localHistorico) ? localHistorico : []);
+      setVales(Array.isArray(localVales) ? localVales : []);
+
+      if (savedUser) {
+        setUser(savedUser);
+        setView("vendedor");
+      }
+    } catch {
+      // em caso de erro no parse, seguimos com estados vazios
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Guardar alterações no localStorage
+  useEffect(() => {
+    if (loading) return;
+
+    localStorage.setItem(STORAGE_KEYS.vendasAtivas, JSON.stringify(vendas));
+    localStorage.setItem(
+      STORAGE_KEYS.historicoArquivado,
+      JSON.stringify(historico),
+    );
+    localStorage.setItem(STORAGE_KEYS.vales, JSON.stringify(vales));
+    if (user) {
+      localStorage.setItem(STORAGE_KEYS.vendedorNome, user);
+    }
+  }, [vendas, historico, vales, user, loading]);
+
+  const stats = useMemo<Stats>(() => {
+    const agora = new Date();
+
+    const inicioSemana = new Date(agora);
+    inicioSemana.setDate(agora.getDate() - agora.getDay());
+    inicioSemana.setHours(0, 0, 0, 0);
+
+    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
+    inicioMes.setHours(0, 0, 0, 0);
+
+    const inicioAno = new Date(agora.getFullYear(), 0, 1);
+    inicioAno.setHours(0, 0, 0, 0);
+
+    const data: Stats = {
+      hoje: 0,
+      semana: 0,
+      mes: 0,
+      ano: 0,
+      vendedores: {},
+    };
+
+    const processarItem = (v: Venda, isArquivado: boolean) => {
+      const dataVenda = new Date(v.data);
+      const valor = Number(v.valor) || 0;
+      const vend = v.vendedor || "S/N";
+
+      if (!data.vendedores[vend]) data.vendedores[vend] = criarStatsVazio();
+
+      if (!isArquivado) {
+        data.hoje += valor;
+        data.vendedores[vend].hoje += valor;
+      }
+      if (dataVenda >= inicioSemana) {
+        data.semana += valor;
+        data.vendedores[vend].semana += valor;
+      }
+      if (dataVenda >= inicioMes) {
+        data.mes += valor;
+        data.vendedores[vend].mes += valor;
+      }
+      if (dataVenda >= inicioAno) {
+        data.ano += valor;
+        data.vendedores[vend].ano += valor;
+      }
+    };
+
+    vendas.forEach((v) => processarItem(v, false));
+    historico.forEach((v) => processarItem(v, true));
+
+    vales.forEach((v) => {
+      const vend = v.vendedor || "S/N";
+      if (!data.vendedores[vend]) data.vendedores[vend] = criarStatsVazio();
+      data.vendedores[vend].valesTotal += Number(v.valor) || 0;
+    });
+
+    return data;
+  }, [vendas, historico, vales]);
+
+  // --- Calculadora dinâmica em reais inteiros (sem centavos / sem sinais) ---
+
+  const handleDigitPress = (digit: number) => {
+    setInputValor((prev) => {
+      const next = prev * 10 + digit;
+      return next > MAX_VALOR ? MAX_VALOR : next;
+    });
+  };
+
+  const handleClear = () => {
+    setInputValor(0);
+  };
+
+  const handleBackspace = () => {
+    setInputValor((prev) => Math.floor(prev / 10));
+  };
+
+  const registrarVenda = () => {
+    if (!selectedProduct || inputValor <= 0) return;
+
+    const novaVenda: Venda = {
+      id: `v-${Date.now()}`,
+      vendedor: user.toUpperCase(),
+      produto: selectedProduct,
+      valor: inputValor,
+      data: new Date().toISOString(),
+    };
+
+    setVendas((prev) => [...prev, novaVenda]);
+    setVendaSucesso(novaVenda);
+
+    // Toca som de dinheiro ao confirmar a venda
+    tocarSomDinheiro();
+
+    setTimeout(() => {
+      setVendaSucesso(null);
+      setInputValor(0);
+      setSelectedProduct(null);
+    }, 1200);
+  };
+
+  const registrarVale = () => {
+    const valor = parseFloat(valeInputValue.replace(",", "."));
+    if (!valor || valor <= 0 || !showValeModal) return;
+
+    const novoVale: Vale = {
+      id: `vale-${Date.now()}`,
+      vendedor: showValeModal,
+      valor,
+      data: new Date().toISOString(),
+    };
+
+    setVales((prev) => [...prev, novoVale]);
+    setShowValeModal(null);
+    setValeInputValue("");
+  };
+
+  const fecharCaixaHoje = () => {
+    if (!vendas.length) return;
+    setHistorico((prev) => [...prev, ...vendas]);
+    setVendas([]);
+  };
+
+  const apagarVendaManual = (id: string) => {
+    setVendas((prev) => prev.filter((v) => v.id !== id));
+  };
+
+  // --- Vistas de autenticação ---
+
+  if (view === "login") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-900 p-6">
+        <div className="w-full max-w-md rounded-[2.5rem] bg-white p-10 text-center shadow-2xl">
+          <h1 className="mb-1 text-7xl font-black italic tracking-tighter text-indigo-600">
+            H7
+          </h1>
+          <p className="mb-10 text-[9px] font-black uppercase tracking-[0.4em] text-slate-400">
+            Ponto de Venda
+          </p>
+          <input
+            type="text"
+            placeholder="VENDEDOR"
+            className="mb-4 w-full rounded-2xl bg-slate-100 p-5 text-center text-xl font-black uppercase outline-none"
+            value={user}
+            onChange={(e) => setUser(e.target.value.toUpperCase())}
+          />
+          <button
+            onClick={() => user && setView("vendedor")}
+            className="w-full rounded-2xl bg-indigo-600 py-5 text-lg font-black uppercase text-white shadow-xl active:scale-95"
+          >
+            Entrar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === "admin-login") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-indigo-600 p-6">
+        <div className="w-full max-w-sm rounded-[3rem] bg-white p-10 text-center shadow-2xl">
+          <h2 className="mb-8 text-xs font-black uppercase tracking-widest text-slate-800">
+            Acesso Gerencial
+          </h2>
+          <input
+            type="password"
+            placeholder="••••"
+            className="mb-6 w-full rounded-2xl border-2 border-transparent bg-slate-50 p-5 text-center text-4xl font-black tracking-[0.4em] outline-none focus:border-indigo-600"
+            value={adminPass}
+            onChange={(e) => setAdminPass(e.target.value)}
+          />
+          <button
+            onClick={() => {
+              if (adminPass === "1234") {
+                setIsAdminAuthenticated(true);
+                setView("admin");
+              } else {
+                // eslint-disable-next-line no-alert
+                alert("Senha incorreta");
+              }
+            }}
+            className="mb-4 w-full rounded-2xl bg-slate-900 py-5 text-sm font-black uppercase text-white shadow-xl"
+          >
+            Acessar
+          </button>
+          <button
+            onClick={() => setView("vendedor")}
+            className="text-[9px] font-black uppercase text-slate-400"
+          >
+            Voltar
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Layout principal (vendedor / admin) ---
+
+  return (
+    <div className="app-container">
+      {/* Modal de Vale */}
+      {showValeModal && (
+        <div className="modal-overlay fixed inset-0 z-[110] flex items-center justify-center p-6">
+          <div className="w-full max-w-xs rounded-[2rem] bg-white p-8 shadow-2xl">
+            <h3 className="mb-2 text-center text-xs font-black uppercase tracking-widest text-slate-400">
+              Dar Vale (AV)
+            </h3>
+            <p className="mb-6 text-center text-lg font-black text-indigo-600">
+              {showValeModal}
+            </p>
+            <input
+              type="number"
+              inputMode="decimal"
+              placeholder="R$ 0,00"
+              className="mb-6 w-full rounded-2xl border-2 border-indigo-100 bg-slate-100 p-4 text-center text-3xl font-black outline-none focus:border-indigo-600"
+              value={valeInputValue}
+              onChange={(e) => setValeInputValue(e.target.value)}
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={() => setShowValeModal(null)}
+                className="rounded-xl bg-slate-100 py-4 text-[10px] font-black uppercase text-slate-500"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={registrarVale}
+                className="rounded-xl bg-rose-500 py-4 text-[10px] font-black uppercase text-white shadow-lg shadow-rose-200"
+              >
+                Confirmar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detalhe de Vendedor */}
+      {selectedVendedorDetail && (
+        <div className="fixed inset-0 z-[110] overflow-y-auto bg-white p-6">
+          <button
+            onClick={() => setSelectedVendedorDetail(null)}
+            className="mb-6 p-2 text-2xl font-black text-slate-300"
+          >
+            ✕
+          </button>
+          <div className="mb-8 text-center">
+            <span className="text-[10px] font-black uppercase tracking-widest text-indigo-600">
+              Desempenho de
+            </span>
+            <h2 className="text-4xl font-black uppercase tracking-tighter text-slate-900">
+              {selectedVendedorDetail}
+            </h2>
+          </div>
+
+          <div className="mb-8 grid grid-cols-2 gap-4">
+            <div className="rounded-[2rem] border bg-slate-50 p-6 text-center">
+              <p className="mb-1 text-[8px] font-black uppercase text-slate-400">
+                Semanal
+              </p>
+              <p className="text-xl font-black text-slate-800">
+                {formatarMoeda(
+                  stats.vendedores[selectedVendedorDetail]?.semana ?? 0,
+                )}
+              </p>
+            </div>
+            <div className="rounded-[2rem] border bg-slate-50 p-6 text-center">
+              <p className="mb-1 text-[8px] font-black uppercase text-slate-400">
+                Mensal
+              </p>
+              <p className="text-xl font-black text-indigo-600">
+                {formatarMoeda(stats.vendedores[selectedVendedorDetail]?.mes ?? 0)}
+              </p>
+            </div>
+            <div className="col-span-2 rounded-[2rem] bg-indigo-600 p-6 text-center shadow-xl">
+              <p className="mb-1 text-[8px] font-black uppercase text-white/60">
+                Anual (Acumulado)
+              </p>
+              <p className="text-4xl font-black text-white">
+                {formatarMoeda(stats.vendedores[selectedVendedorDetail]?.ano ?? 0)}
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-8 rounded-[2rem] border-2 border-rose-100 bg-rose-50 p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <span className="text-[9px] font-black uppercase tracking-widest text-rose-500">
+                Resumo de Vales
+              </span>
+              <span className="font-black text-rose-600">
+                {formatarMoeda(
+                  stats.vendedores[selectedVendedorDetail]?.valesTotal ?? 0,
+                )}
+              </span>
+            </div>
+            <div className="max-h-40 space-y-2 overflow-y-auto pr-2">
+              {vales
+                .filter((v) => v.vendedor === selectedVendedorDetail)
+                .map((v) => (
+                  <div
+                    key={v.id}
+                    className="flex justify-between border-b border-rose-100 pb-1 text-[9px] font-bold text-rose-400"
+                  >
+                    <span>
+                      {new Date(v.data).toLocaleDateString("pt-BR", {
+                        day: "2-digit",
+                        month: "2-digit",
+                        year: "2-digit",
+                      })}
+                    </span>
+                    <span>- {formatarMoeda(v.valor)}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Animação de venda confirmada */}
+      {vendaSucesso && (
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-indigo-600 p-8 text-white">
+          <div className="venda-confirmada-anim text-center">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white/20">
+              <svg
+                className="h-8 w-8 text-white"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={4}
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+            </div>
+            <h2 className="mb-1 text-xl font-black uppercase italic">
+              Venda Registrada
+            </h2>
+            <div className="text-6xl font-black tracking-tighter">
+              {formatarMoeda(vendaSucesso.valor)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="z-40 flex items-center justify-between border-b bg-white px-5 py-3">
+        <div className="flex items-center gap-3">
+          <div className="rounded-lg bg-indigo-600 px-3 py-1 text-xl font-black italic text-white">
+            H7
+          </div>
+          <span className="text-[9px] font-black uppercase tracking-widest text-indigo-600">
+            {view === "admin" ? "GERÊNCIA" : user || "SEM NOME"}
+          </span>
+        </div>
+        <button
+          onClick={() => {
+            localStorage.removeItem(STORAGE_KEYS.vendedorNome);
+            setView("login");
+          }}
+          className="p-1 text-lg font-black text-slate-300"
+        >
+          ✕
+        </button>
+      </header>
+
+      {/* Conteúdo principal */}
+      <main className="main-content">
+        {view === "vendedor" ? (
+          !selectedProduct ? (
+            // Grid de produtos
+            <div className="grid grid-cols-2 gap-3 p-4">
+              {(Object.keys(productColors) as Produto[]).map((item) => (
+                <button
+                  key={item}
+                  onClick={() => {
+                    setSelectedProduct(item);
+                    setInputValor(0);
+                  }}
+                  className={`h-28 rounded-[2rem] border-b-8 text-xs font-black uppercase text-white shadow-lg transition-all active:translate-y-1 active:border-b-0 ${productColors[item]}`}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          ) : (
+            // Calculadora dinâmica em tela cheia
+            <div className="calc-fullscreen bg-white">
+              <div className="flex flex-col items-center justify-center bg-slate-900 px-6 py-10">
+                <span
+                  className={`${productColors[selectedProduct]} mb-2 rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-widest text-white`}
+                >
+                  {selectedProduct}
+                </span>
+                <div className="text-6xl font-black tracking-tighter text-white">
+                  {formatarMoeda(inputValor)}
+                </div>
+              </div>
+
+              <div className="flex flex-1 flex-col gap-3 bg-slate-50 p-4">
+                <div className="numpad-grid">
+                  {/* 1-9 */}
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => handleDigitPress(n)}
+                      className="rounded-2xl border-b-4 border-slate-200 bg-white text-3xl font-black text-slate-800 shadow-sm transition-colors active:bg-indigo-600 active:text-white"
+                    >
+                      {n}
+                    </button>
+                  ))}
+
+                  {/* C, 0, Backspace */}
+                  <button
+                    type="button"
+                    onClick={handleClear}
+                    className="rounded-2xl border-b-4 border-rose-100 bg-rose-50 text-2xl font-black text-rose-500"
+                  >
+                    C
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDigitPress(0)}
+                    className="rounded-2xl border-b-4 border-slate-200 bg-white text-3xl font-black text-slate-800 shadow-sm transition-colors active:bg-indigo-600 active:text-white"
+                  >
+                    0
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleBackspace}
+                    className="rounded-2xl border-b-4 border-slate-200 bg-slate-100 text-2xl font-black text-slate-500"
+                  >
+                    ⌫
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedProduct(null);
+                      setInputValor(0);
+                    }}
+                    className="rounded-2xl border-b-4 bg-white py-5 text-xs font-black uppercase text-slate-400 active:translate-y-1 active:border-b-0"
+                  >
+                    Voltar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={registrarVenda}
+                    disabled={inputValor <= 0}
+                    className={`rounded-2xl py-5 text-xl font-black uppercase shadow-lg transition-all ${
+                      inputValor <= 0
+                        ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                        : "border-b-4 border-indigo-800 bg-indigo-600 text-white active:translate-y-1 active:border-b-0"
+                    }`}
+                  >
+                    Concluir
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        ) : (
+          // Vista Admin
+          <div className="extrato-container space-y-5 p-4">
+            <div className="flex gap-1 rounded-2xl bg-slate-200 p-1">
+              <button
+                onClick={() => setAdminSubView("extrato")}
+                className={`flex-1 rounded-xl py-3 text-[9px] font-black uppercase tracking-widest ${
+                  adminSubView === "extrato"
+                    ? "bg-white text-indigo-600 shadow-sm"
+                    : "text-slate-500"
+                }`}
+              >
+                Visão Geral
+              </button>
+              <button
+                onClick={() => setAdminSubView("comissoes")}
+                className={`flex-1 rounded-xl py-3 text-[9px] font-black uppercase tracking-widest ${
+                  adminSubView === "comissoes"
+                    ? "bg-white text-indigo-600 shadow-sm"
+                    : "text-slate-500"
+                }`}
+              >
+                Comissões &amp; Vales
+              </button>
+            </div>
+
+            {adminSubView === "extrato" ? (
+              <div className="space-y-4">
+                <div className="flex flex-col items-center rounded-[2.5rem] bg-indigo-600 p-8 text-white shadow-xl">
+                  <span className="mb-1 text-[9px] font-black uppercase tracking-widest italic opacity-60">
+                    No Caixa Agora
+                  </span>
+                  <h2 className="mb-8 text-6xl font-black tracking-tighter">
+                    {formatarMoeda(stats.hoje)}
+                  </h2>
+                  <button
+                    onClick={fecharCaixaHoje}
+                    disabled={!vendas.length}
+                    className="w-full rounded-2xl bg-white py-4 text-[10px] font-black uppercase tracking-widest text-indigo-600 shadow-lg active:scale-95 disabled:opacity-50"
+                  >
+                    Fechar Caixa Hoje
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="rounded-[1.5rem] border bg-white p-4 text-center shadow-sm">
+                    <p className="mb-1 text-[7px] font-black uppercase text-slate-400">
+                      Semana
+                    </p>
+                    <p className="text-[10px] font-black tracking-tighter text-slate-800">
+                      {formatarMoeda(stats.semana)}
+                    </p>
+                  </div>
+                  <div className="rounded-[1.5rem] border bg-white p-4 text-center shadow-sm">
+                    <p className="mb-1 text-[7px] font-black uppercase text-slate-400">
+                      Mês
+                    </p>
+                    <p className="text-[10px] font-black tracking-tighter text-indigo-600">
+                      {formatarMoeda(stats.mes)}
+                    </p>
+                  </div>
+                  <div className="rounded-[1.5rem] border bg-white p-4 text-center shadow-sm">
+                    <p className="mb-1 text-[7px] font-black uppercase text-slate-400">
+                      Anual
+                    </p>
+                    <p className="text-[10px] font-black tracking-tighter text-emerald-600">
+                      {formatarMoeda(stats.ano)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4 overflow-hidden rounded-[2rem] bg-slate-900 shadow-xl">
+                  <div className="flex items-center justify-between border-b border-white/5 bg-black/20 p-4">
+                    <span className="text-[9px] font-black uppercase tracking-widest text-white/40 italic">
+                      Visor do Dia
+                    </span>
+                    <span className="text-[9px] font-black text-indigo-400">
+                      {vendas.length} itens
+                    </span>
+                  </div>
+                  <div className="max-h-[350px] divide-y divide-white/5 overflow-y-auto">
+                    {!vendas.length ? (
+                      <div className="p-12 text-center text-[9px] font-black uppercase tracking-[0.2em] text-slate-600">
+                        Visor Vazio
+                      </div>
+                    ) : (
+                      vendas.map((v) => (
+                        <div
+                          key={v.id}
+                          className="flex items-center justify-between bg-white/5 p-4"
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] font-black uppercase italic text-white">
+                                {v.vendedor}
+                              </span>
+                              <span
+                                className={`${
+                                  productColors[v.produto]
+                                } rounded px-1.5 py-0.5 text-[8px] font-black uppercase text-white`}
+                              >
+                                {v.produto}
+                              </span>
+                            </div>
+                            <span className="text-[8px] font-bold uppercase text-slate-500">
+                              {new Date(v.data).toLocaleTimeString("pt-BR", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-base font-black tracking-tighter text-white">
+                              {formatarMoeda(v.valor)}
+                            </span>
+                            <button
+                              onClick={() => apagarVendaManual(v.id)}
+                              className="p-2 text-xs text-rose-500/40 hover:text-rose-500"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="mb-2 text-center">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest text-slate-400 italic">
+                    Toque no nome para ver o extrato
+                  </h3>
+                </div>
+                {Object.entries(stats.vendedores).map(([nome, d]) => {
+                  const comissaoTotal = d.mes * 0.03;
+                  const saldoFinal = comissaoTotal - d.valesTotal;
+
+                  return (
+                    <div
+                      key={nome}
+                      className="space-y-4 rounded-[2rem] border bg-white p-5 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between">
+                        <button
+                          onClick={() => setSelectedVendedorDetail(nome)}
+                          className="group text-left"
+                        >
+                          <span className="block text-base font-black uppercase text-slate-800 transition-colors group-active:text-indigo-600">
+                            {nome} →
+                          </span>
+                          <span className="text-[8px] font-bold uppercase tracking-tight text-slate-400 italic">
+                            Mês Atual: {formatarMoeda(d.mes)}
+                          </span>
+                        </button>
+                        <div className="text-right">
+                          <span className="mb-1 block text-[8px] font-black uppercase italic text-indigo-600">
+                            Saldo Comissões
+                          </span>
+                          <span
+                            className={`text-xl font-black tracking-tighter ${
+                              saldoFinal < 0 ? "text-rose-500" : "text-indigo-600"
+                            }`}
+                          >
+                            {formatarMoeda(saldoFinal)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setShowValeModal(nome)}
+                          className="flex-1 rounded-xl border border-rose-100 bg-rose-50 py-3 text-[9px] font-black uppercase tracking-widest text-rose-500 transition-all active:bg-rose-500 active:text-white"
+                        >
+                          Dar Vale (AV)
+                        </button>
+                        <div className="flex flex-col justify-center rounded-xl border bg-slate-50 px-4 py-3">
+                          <span className="text-[7px] font-black uppercase italic text-slate-400">
+                            Vales: {formatarMoeda(d.valesTotal)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      {/* Navegação inferior */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 flex h-16 items-center justify-around border-t bg-white/95 backdrop-blur-md">
+        <button
+          onClick={() => {
+            setView("vendedor");
+            setSelectedProduct(null);
+            setInputValor(0);
+          }}
+          className={`flex h-full flex-1 flex-col items-center justify-center gap-1 ${
+            view === "vendedor"
+              ? "border-t-2 border-indigo-600 bg-indigo-50/50 text-indigo-600"
+              : "text-slate-300"
+          }`}
+        >
+          <svg
+            className="h-5 w-5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2.5}
+              d="M12 4v16m8-8H4"
+            />
+          </svg>
+          <span className="text-[8px] font-black uppercase tracking-tighter">
+            Vendas
+          </span>
+        </button>
+        <button
+          onClick={() =>
+            isAdminAuthenticated ? setView("admin") : setView("admin-login")
+          }
+          className={`flex h-full flex-1 flex-col items-center justify-center gap-1 ${
+            view === "admin"
+              ? "border-t-2 border-indigo-600 bg-indigo-50/50 text-indigo-600"
+              : "text-slate-300"
+          }`}
+        >
+          <svg
+            className="h-5 w-5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2.5}
+              d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+            />
+          </svg>
+          <span className="text-[8px] font-black uppercase tracking-tighter">
+            Gerencial
+          </span>
+        </button>
+      </nav>
+    </div>
+  );
+}
