@@ -1,0 +1,612 @@
+import { useState, useEffect, useMemo } from "react";
+
+// ============================
+// FIREBASE CONFIG (SUAS CHAVES) - ATUALIZE AQUI!
+// ============================
+const firebaseConfig = {
+  apiKey: "SUA_NOVA_API_KEY",
+  authDomain: "SEU_NOVO_AUTH_DOMAIN",
+  projectId: "SEU_NOVO_PROJECT_ID",
+  storageBucket: "SEU_NOVO_STORAGE_BUCKET",
+  messagingSenderId: "SEU_NOVO_MESSAGING_SENDER_ID",
+  appId: "SEU_NOVA_APP_ID"
+};
+
+// Simulando Firebase para desenvolvimento (remova e adicione o SDK real se precisar)
+// Para usar Firebase real, instale os pacotes e importe o SDK
+const mockFirebase = {
+  firestore: () => ({
+    collection: (name: string) => ({
+      orderBy: () => ({
+        onSnapshot: (callback: any) => {
+          // Dados mock para testes
+          const mockData = name === "vendasAtivas" ? [
+            { id: "v-1", vendedor: "MARIA", produto: "Camisa", valor: 39.90, data: new Date().toISOString() },
+            { id: "v-2", vendedor: "JOÃO", produto: "Bermuda", valor: 59.90, data: new Date().toISOString() }
+          ] : name === "historico" ? [] : name === "vales" ? [] : [];
+          
+          callback({
+            forEach: (fn: any) => mockData.forEach(fn)
+          });
+          return () => {};
+        }
+      }),
+      doc: (id: string) => ({
+        set: async () => Promise.resolve(),
+        delete: async () => Promise.resolve()
+      })
+    })
+  })
+};
+
+function App() {
+  const [view, setView] = useState("login");
+  const [adminSubView, setAdminSubView] = useState("extrato");
+  const [user, setUser] = useState("");
+  const [vendas, setVendas] = useState([]);
+  const [historico, setHistorico] = useState([]);
+  const [vales, setVales] = useState([]);
+  const [adminPass, setAdminPass] = useState("");
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<string | null>(null);
+  const [inputValue, setInputValue] = useState("");
+  const [vendaSucesso, setVendaSucesso] = useState<any>(null);
+  const [showValeModal, setShowValeModal] = useState<string | null>(null);
+  const [valeInputValue, setValeInputValue] = useState("");
+  const [selectedVendedorDetail, setSelectedVendedorDetail] = useState<string | null>(null);
+
+  const productColors = {
+    "Camisa": "bg-red-500 border-red-700 text-white shadow-red-200",
+    "Bermuda": "bg-blue-500 border-blue-700 text-white shadow-blue-200",
+    "Moda Íntima": "bg-pink-500 border-pink-700 text-white shadow-pink-200",
+    "Short": "bg-green-500 border-green-700 text-white shadow-green-200",
+    "Blusa": "bg-amber-500 border-amber-700 text-white shadow-amber-200",
+    "Calça": "bg-purple-500 border-purple-700 text-white shadow-purple-200",
+    "Vestido": "bg-cyan-500 border-cyan-700 text-white shadow-cyan-200",
+    "Atacado": "bg-slate-600 border-slate-800 text-white shadow-slate-200"
+  };
+
+  // Carregar vendedor salvo localmente
+  useEffect(() => {
+    const savedUser = localStorage.getItem("h7_vendedor_nome") || "";
+    if (savedUser) {
+      setUser(savedUser);
+      setView("vendedor");
+    }
+  }, []);
+
+  // Salvar vendedor localmente
+  useEffect(() => {
+    if (user) localStorage.setItem("h7_vendedor_nome", user);
+  }, [user]);
+
+  // ============================
+  // "FIRESTORE" - Dados Mock para Testes
+  // ============================
+  useEffect(() => {
+    // Dados padrão para teste
+    const initialVendas = [
+      { id: "v-1645321800000", vendedor: "MARIA", produto: "Camisa", valor: 39.90, data: new Date(Date.now() - 3600000).toISOString() },
+      { id: "v-1645325400000", vendedor: "JOÃO", produto: "Bermuda", valor: 59.90, data: new Date(Date.now() - 1800000).toISOString() }
+    ];
+    
+    setVendas(initialVendas);
+    setHistorico([]);
+    setVales([]);
+  }, []);
+
+  const formatarMoeda = (valor: number) => {
+    return (valor || 0).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  };
+
+  const stats = useMemo(() => {
+    const agora = new Date();
+    const inicioSemana = new Date(agora);
+    inicioSemana.setDate(agora.getDate() - agora.getDay());
+    inicioSemana.setHours(0, 0, 0, 0);
+    const inicioMes = new Date(agora.getFullYear(), agora.getMonth(), 1);
+    const inicioAno = new Date(agora.getFullYear(), 0, 1);
+
+    const data: any = { hoje: 0, semana: 0, mes: 0, ano: 0, vendedores: {} };
+
+    const processarItem = (v: any, isArquivado: boolean) => {
+      const dataVenda = new Date(v.data);
+      const valor = parseFloat(v.valor || 0);
+      const vend = v.vendedor || "S/N";
+      if (!data.vendedores[vend]) {
+        data.vendedores[vend] = { hoje: 0, semana: 0, mes: 0, ano: 0, valesTotal: 0 };
+      }
+      if (!isArquivado) { data.hoje += valor; data.vendedores[vend].hoje += valor; }
+      if (dataVenda >= inicioSemana) { data.semana += valor; data.vendedores[vend].semana += valor; }
+      if (dataVenda >= inicioMes) { data.mes += valor; data.vendedores[vend].mes += valor; }
+      if (dataVenda >= inicioAno) { data.ano += valor; data.vendedores[vend].ano += valor; }
+    };
+
+    vendas.forEach((v: any) => processarItem(v, false));
+    historico.forEach((v: any) => processarItem(v, true));
+    vales.forEach((v: any) => {
+      if (data.vendedores[v.vendedor]) {
+        data.vendedores[v.vendedor].valesTotal += parseFloat(v.valor);
+      }
+    });
+
+    return data;
+  }, [vendas, historico, vales]);
+
+  const tocarSomDinheiro = () => {
+    // Simulação de som
+    console.log("Som de dinheiro reproduzido");
+  };
+
+  // ============================
+  // FUNÇÕES DE VENDA
+  // ============================
+  const registrarVenda = async () => {
+    if (!selectedProduct || !inputValue) return;
+    const valor = Number(inputValue);
+    if (!valor || valor <= 0) return;
+
+    const novaVenda = {
+      id: "v-" + Date.now(),
+      vendedor: user.toUpperCase(),
+      produto: selectedProduct,
+      valor: valor,
+      data: new Date().toISOString()
+    };
+
+    try {
+      // Simulando Firebase call
+      setVendas(prev => [novaVenda, ...prev]);
+      setVendaSucesso(novaVenda);
+      tocarSomDinheiro();
+      setTimeout(() => {
+        setVendaSucesso(null);
+        setInputValue("");
+        setSelectedProduct(null);
+      }, 1200);
+    } catch (e) {
+      alert("Erro ao registrar venda: " + (e as Error).message);
+    }
+  };
+
+  const registrarVale = async () => {
+    const valor = parseFloat(valeInputValue);
+    if (!valor || valor <= 0) return;
+
+    const novoVale = {
+      id: "vale-" + Date.now(),
+      vendedor: showValeModal,
+      valor: valor,
+      data: new Date().toISOString()
+    };
+
+    try {
+      setVales(prev => [novoVale, ...prev]);
+      setShowValeModal(null);
+      setValeInputValue("");
+    } catch (e) {
+      alert("Erro ao registrar vale: " + (e as Error).message);
+    }
+  };
+
+  const fecharCaixaHoje = async () => {
+    if (vendas.length === 0) return;
+
+    try {
+      setHistorico(prev => [...vendas, ...prev]);
+      setVendas([]);
+    } catch (e) {
+      alert("Erro ao fechar caixa: " + (e as Error).message);
+    }
+  };
+
+  const apagarVendaManual = async (id: string) => {
+    try {
+      setVendas(prev => prev.filter((v: any) => v.id !== id));
+    } catch (e) {
+      alert("Erro ao apagar venda: " + (e as Error).message);
+    }
+  };
+
+  // ============================
+  // TELAS
+  // ============================
+  if (view === "login") return (
+    <div className="flex-1 bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900 flex items-center justify-center p-6">
+      <div className="w-full max-w-md bg-white rounded-[2.5rem] p-10 shadow-2xl text-center">
+        <h1 className="text-7xl font-black text-indigo-600 italic mb-1 tracking-tighter">H7</h1>
+        <p className="text-slate-400 text-[9px] font-black uppercase tracking-[0.4em] mb-10">Ponto de Venda</p>
+        <input 
+          type="text" 
+          placeholder="VENDEDOR" 
+          className="w-full p-5 bg-slate-100 rounded-2xl mb-4 font-black text-center outline-none uppercase text-xl focus:ring-4 focus:ring-indigo-100" 
+          value={user} 
+          onChange={(e) => setUser(e.target.value)} 
+        />
+        <button 
+          onClick={() => user && setView("vendedor")} 
+          className="w-full bg-gradient-to-r from-indigo-600 to-indigo-700 text-white font-black py-5 rounded-2xl shadow-xl uppercase active:scale-95 text-lg transition-all"
+        >
+          Entrar
+        </button>
+      </div>
+    </div>
+  );
+
+  if (view === "admin-login") return (
+    <div className="flex-1 bg-gradient-to-r from-indigo-600 to-indigo-700 flex items-center justify-center p-6">
+      <div className="w-full max-w-sm bg-white rounded-[3rem] p-10 text-center shadow-2xl">
+        <h2 className="font-black uppercase text-xs mb-8 text-slate-800 tracking-widest">Acesso Gerencial</h2>
+        <input 
+          type="password" 
+          placeholder="••••" 
+          className="w-full p-5 bg-slate-50 rounded-2xl mb-6 text-center text-4xl font-black outline-none border-2 border-transparent focus:border-indigo-600 tracking-[0.4em]" 
+          value={adminPass} 
+          onChange={(e) => setAdminPass(e.target.value)} 
+        />
+        <button 
+          onClick={() => { 
+            if (adminPass === "1234") { 
+              setIsAdminAuthenticated(true); 
+              setView("admin"); 
+            } else { 
+              alert("Senha incorreta"); 
+            } 
+          }} 
+          className="w-full bg-slate-900 text-white font-black py-5 rounded-2xl uppercase text-sm shadow-xl mb-4"
+        >
+          Acessar
+        </button>
+        <button 
+          onClick={() => setView("vendedor")} 
+          className="text-slate-400 font-black uppercase text-[9px]"
+        >
+          Voltar
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col h-screen bg-slate-50">
+      {showValeModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-xs rounded-[2rem] p-8 shadow-2xl">
+            <h3 className="text-center font-black uppercase text-xs text-slate-400 mb-2">Dar Vale (AV)</h3>
+            <p className="text-center font-black text-indigo-600 text-lg mb-6">{showValeModal}</p>
+            <input 
+              type="number" 
+              placeholder="R$ 0" 
+              className="w-full p-4 bg-slate-100 rounded-2xl mb-6 text-center text-3xl font-black outline-none border-2 border-indigo-100 focus:border-indigo-600" 
+              value={valeInputValue} 
+              onChange={(e) => setValeInputValue(e.target.value)} 
+              autoFocus 
+            />
+            <div className="grid grid-cols-2 gap-3">
+              <button 
+                onClick={() => setShowValeModal(null)} 
+                className="py-4 bg-slate-100 text-slate-500 rounded-xl font-black uppercase text-[10px]"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={registrarVale} 
+                className="py-4 bg-gradient-to-r from-rose-500 to-rose-600 text-white rounded-xl font-black uppercase text-[10px] shadow-lg shadow-rose-200"
+              >
+                Confirmar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {selectedVendedorDetail && (
+        <div className="fixed inset-0 z-[110] bg-white overflow-y-auto p-6">
+          <button 
+            onClick={() => setSelectedVendedorDetail(null)} 
+            className="mb-6 p-2 text-slate-300 font-black text-2xl"
+          >
+            ✕
+          </button>
+          <div className="text-center mb-8">
+            <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest italic">Desempenho de</span>
+            <h2 className="text-4xl font-black text-slate-900 uppercase tracking-tighter">{selectedVendedorDetail}</h2>
+          </div>
+          <div className="grid grid-cols-2 gap-4 mb-8">
+            <div className="bg-slate-50 p-6 rounded-[2rem] border text-center">
+              <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Semanal</p>
+              <p className="text-xl font-black text-slate-800">{formatarMoeda(stats.vendedores[selectedVendedorDetail]?.semana || 0)}</p>
+            </div>
+            <div className="bg-slate-50 p-6 rounded-[2rem] border text-center">
+              <p className="text-[8px] font-black text-slate-400 uppercase mb-1">Mensal</p>
+              <p className="text-xl font-black text-indigo-600">{formatarMoeda(stats.vendedores[selectedVendedorDetail]?.mes || 0)}</p>
+            </div>
+            <div className="bg-gradient-to-r from-indigo-600 to-indigo-700 p-6 rounded-[2rem] text-center col-span-2 shadow-xl">
+              <p className="text-[8px] font-black text-white/60 uppercase mb-1">Anual (Acumulado)</p>
+              <p className="text-4xl font-black text-white">{formatarMoeda(stats.vendedores[selectedVendedorDetail]?.ano || 0)}</p>
+            </div>
+          </div>
+          <div className="bg-rose-50 p-6 rounded-[2rem] border-2 border-rose-100 mb-8">
+            <div className="flex justify-between items-center mb-4">
+              <span className="text-[9px] font-black text-rose-500 uppercase tracking-widest">Resumo de Vales</span>
+              <span className="font-black text-rose-600">{formatarMoeda(stats.vendedores[selectedVendedorDetail]?.valesTotal || 0)}</span>
+            </div>
+            <div className="space-y-2 max-h-40 overflow-y-auto pr-2">
+              {vales.filter((v: any) => v.vendedor === selectedVendedorDetail).map((v: any) => (
+                <div key={v.id} className="flex justify-between text-[9px] font-bold text-rose-400 border-b border-rose-100 pb-1">
+                  <span>{new Date(v.data).toLocaleDateString()}</span>
+                  <span>- {formatarMoeda(v.valor)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {vendaSucesso && (
+        <div className="fixed inset-0 z-[100] bg-gradient-to-br from-indigo-600 to-indigo-700 flex flex-col items-center justify-center p-8 text-white">
+          <div className="animate-fade-in text-center">
+            <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M5 13l4 4L19 7"></path>
+              </svg>
+            </div>
+            <h2 className="text-xl font-black uppercase mb-1 italic">Venda Registrada</h2>
+            <div className="text-6xl font-black tabular-nums tracking-tighter">{formatarMoeda(vendaSucesso.valor)}</div>
+          </div>
+        </div>
+      )}
+
+      <header className="bg-white border-b px-5 py-3 flex justify-between items-center z-40">
+        <div className="flex items-center gap-3">
+          <div className="bg-gradient-to-r from-indigo-600 to-indigo-700 px-3 py-1 rounded-lg text-white font-black italic text-xl">H7</div>
+          <span className="text-[9px] font-black uppercase text-indigo-600 tracking-widest">
+            {view === "admin" ? "GERÊNCIA" : user}
+          </span>
+        </div>
+        <button 
+          onClick={() => { 
+            localStorage.removeItem("h7_vendedor_nome"); 
+            setView("login"); 
+          }} 
+          className="text-slate-300 font-black text-lg p-1"
+        >
+          ✕
+        </button>
+      </header>
+
+      <main className="flex-1 overflow-y-auto">
+        {view === "vendedor" ? (
+          !selectedProduct ? (
+            <div className="p-4 grid grid-cols-2 gap-3">
+              {Object.keys(productColors).map((item) => (
+                <button 
+                  key={item} 
+                  className={`h-28 rounded-[2rem] font-black text-xs uppercase shadow-lg border-b-4 active:translate-y-1 active:border-b-0 transition-all ${productColors[item]}`} 
+                  onClick={() => setSelectedProduct(item)}
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="flex flex-col h-full bg-white">
+              <div className="bg-gradient-to-br from-slate-900 to-slate-800 py-10 px-6 flex flex-col items-center justify-center">
+                <span className={`font-black text-[10px] uppercase tracking-widest mb-2 px-3 py-1 rounded-full text-white ${
+                  productColors[selectedProduct]
+                }`}>
+                  {selectedProduct}
+                </span>
+                <div className="text-6xl font-black text-white tabular-nums tracking-tighter">
+                  {formatarMoeda(Number(inputValue || 0))}
+                </div>
+              </div>
+              <div className="flex-1 p-4 flex flex-col gap-3 bg-slate-50">
+                <div className="grid grid-cols-3 gap-3">
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 0].map((n) => (
+                    <button 
+                      key={n} 
+                      onClick={() => setInputValue((p) => p === "0" ? String(n) : p + String(n))} 
+                      className="bg-white rounded-2xl font-black text-3xl text-slate-800 shadow-sm border-b-4 border-slate-200 active:bg-indigo-600 active:text-white transition-colors"
+                    >
+                      {n}
+                    </button>
+                  ))}
+                  <button 
+                    onClick={() => setInputValue((p) => p.slice(0, -1) || "")} 
+                    className="bg-amber-50 text-amber-500 rounded-2xl font-black text-2xl border-b-4 border-amber-100"
+                  >
+                    ⌫
+                  </button>
+                  <button 
+                    onClick={() => setInputValue("")} 
+                    className="bg-rose-50 text-rose-500 rounded-2xl font-black text-2xl border-b-4 border-rose-100"
+                  >
+                    C
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-4 pb-2">
+                  <button 
+                    onClick={() => { setSelectedProduct(null); setInputValue(""); }} 
+                    className="py-5 bg-white text-slate-400 rounded-2xl font-black uppercase text-xs border-b-4 active:translate-y-1 active:border-b-0"
+                  >
+                    Voltar
+                  </button>
+                  <button 
+                    onClick={registrarVenda} 
+                    disabled={!inputValue || Number(inputValue) <= 0} 
+                    className={`py-5 rounded-2xl font-black text-xl uppercase shadow-lg transition-all ${
+                      !inputValue || Number(inputValue) <= 0 
+                        ? "bg-slate-200 text-slate-400" 
+                        : "bg-gradient-to-r from-indigo-600 to-indigo-700 text-white border-b-4 active:translate-y-1 active:border-b-0"
+                    }`}
+                  >
+                    Concluir
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        ) : (
+          <div className="p-4 space-y-5">
+            <div className="flex p-1 bg-slate-200 rounded-2xl gap-1">
+              <button 
+                onClick={() => setAdminSubView("extrato")} 
+                className={`flex-1 py-3 rounded-xl font-black text-[9px] uppercase tracking-widest ${
+                  adminSubView === "extrato" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500"
+                }`}
+              >
+                Visão Geral
+              </button>
+              <button 
+                onClick={() => setAdminSubView("comissoes")} 
+                className={`flex-1 py-3 rounded-xl font-black text-[9px] uppercase tracking-widest ${
+                  adminSubView === "comissoes" ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500"
+                }`}
+              >
+                Comissões & Vales
+              </button>
+            </div>
+
+            {adminSubView === "extrato" ? (
+              <div className="space-y-4">
+                <div className="bg-gradient-to-br from-indigo-600 to-indigo-700 rounded-[2.5rem] p-8 text-white shadow-xl flex flex-col items-center">
+                  <span className="text-[9px] font-black uppercase tracking-widest mb-1 opacity-60 italic">No Caixa Agora</span>
+                  <h2 className="text-6xl font-black tracking-tighter mb-8">{formatarMoeda(stats.hoje)}</h2>
+                  <button 
+                    onClick={fecharCaixaHoje} 
+                    className="w-full bg-white text-indigo-600 font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest shadow-lg active:scale-95 disabled:opacity-50" 
+                    disabled={vendas.length === 0}
+                  >
+                    Fechar Caixa Hoje
+                  </button>
+                </div>
+                
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="bg-white p-4 rounded-[1.5rem] border text-center shadow-sm">
+                    <p className="text-[7px] font-black text-slate-400 uppercase mb-1">Semana</p>
+                    <p className="text-[10px] font-black text-slate-800 tracking-tighter">{formatarMoeda(stats.semana)}</p>
+                  </div>
+                  <div className="bg-white p-4 rounded-[1.5rem] border text-center shadow-sm">
+                    <p className="text-[7px] font-black text-slate-400 uppercase mb-1">Mês</p>
+                    <p className="text-[10px] font-black text-indigo-600 tracking-tighter">{formatarMoeda(stats.mes)}</p>
+                  </div>
+                  <div className="bg-white p-4 rounded-[1.5rem] border text-center shadow-sm">
+                    <p className="text-[7px] font-black text-slate-400 uppercase mb-1">Anual</p>
+                    <p className="text-[10px] font-black text-emerald-600 tracking-tighter">{formatarMoeda(stats.ano)}</p>
+                  </div>
+                </div>
+                
+                <div className="bg-slate-900 rounded-[2rem] overflow-hidden shadow-xl mt-4">
+                  <div className="p-4 bg-black/20 border-b border-white/5 flex justify-between items-center">
+                    <span className="text-[9px] font-black text-white/40 uppercase tracking-widest italic">Visor do Dia</span>
+                    <span className="text-[9px] font-black text-indigo-400">{vendas.length} itens</span>
+                  </div>
+                  <div className="divide-y divide-white/5 max-h-[350px] overflow-y-auto">
+                    {vendas.length === 0 ? (
+                      <div className="p-12 text-center text-slate-600 font-black text-[9px] uppercase tracking-[0.2em]">Visor Vazio</div>
+                    ) : (
+                      vendas.map((v: any) => (
+                        <div key={v.id} className="p-4 flex justify-between items-center bg-white/[0.02]">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-black text-white text-[10px] uppercase italic">{v.vendedor}</span>
+                              <span className={`text-[8px] px-1.5 py-0.5 rounded uppercase font-black text-white ${productColors[v.produto]}`}>{v.produto}</span>
+                            </div>
+                            <span className="text-[8px] text-slate-500 font-bold uppercase">{new Date(v.data).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="font-black text-white text-base tracking-tighter">{formatarMoeda(v.valor)}</span>
+                            <button 
+                              onClick={() => apagarVendaManual(v.id)} 
+                              className="text-rose-500/40 hover:text-rose-500 p-2 text-xs"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="text-center mb-2">
+                  <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest italic">Toque no nome para ver o extrato</h3>
+                </div>
+                
+                {Object.entries(stats.vendedores).map(([nome, d]: any) => {
+                  const comissaoTotal = d.mes * 0.03;
+                  const saldoFinal = comissaoTotal - d.valesTotal;
+                  
+                  return (
+                    <div key={nome} className="bg-white rounded-[2rem] p-5 border shadow-sm space-y-4">
+                      <div className="flex justify-between items-start">
+                        <button 
+                          onClick={() => setSelectedVendedorDetail(nome)} 
+                          className="text-left group"
+                        >
+                          <span className="font-black uppercase text-base text-slate-800 block group-active:text-indigo-600 transition-colors">{nome} →</span>
+                          <span className="text-[8px] text-slate-400 font-bold uppercase tracking-tight italic">
+                            Mês Atual: {formatarMoeda(d.mes)}
+                          </span>
+                        </button>
+                        <div className="text-right">
+                          <span className="text-[8px] font-black text-indigo-600 block uppercase mb-1 italic">Saldo Comissões</span>
+                          <span className={`text-xl font-black tracking-tighter ${saldoFinal < 0 ? "text-rose-500" : "text-indigo-600"}`}>
+                            {formatarMoeda(saldoFinal)}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => setShowValeModal(nome)} 
+                          className="flex-1 bg-rose-50 text-rose-500 py-3 rounded-xl font-black uppercase text-[9px] tracking-widest border border-rose-100 active:bg-rose-500 active:text-white transition-all"
+                        >
+                          Dar Vale (AV)
+                        </button>
+                        <div className="px-4 py-3 bg-slate-50 rounded-xl border flex flex-col justify-center">
+                          <span className="text-[7px] font-black text-slate-400 uppercase italic">
+                            Vales: {formatarMoeda(d.valesTotal)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+
+      <nav className="bg-white/95 backdrop-blur-md border-t flex justify-around items-center h-16 fixed bottom-0 left-0 right-0 z-40">
+        <button 
+          onClick={() => { setView("vendedor"); setSelectedProduct(null); }} 
+          className={`flex-1 h-full flex flex-col items-center justify-center gap-1 ${
+            view === "vendedor" ? "text-indigo-600 border-t-2 border-indigo-600 bg-indigo-50/50" : "text-slate-300"
+          }`}
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 4v16m8-8H4"></path>
+          </svg>
+          <span className="text-[8px] font-black uppercase tracking-tighter">Vendas</span>
+        </button>
+        <button 
+          onClick={() => isAdminAuthenticated ? setView("admin") : setView("admin-login")} 
+          className={`flex-1 h-full flex flex-col items-center justify-center gap-1 ${
+            view === "admin" || view === "admin-login" ? "text-indigo-600 border-t-2 border-indigo-600 bg-indigo-50/50" : "text-slate-300"
+          }`}
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+          </svg>
+          <span className="text-[8px] font-black uppercase tracking-tighter">Gerencial</span>
+        </button>
+      </nav>
+    </div>
+  );
+}
+
+export default App;
